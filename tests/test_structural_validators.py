@@ -391,6 +391,67 @@ class SpokenDurationTests(unittest.TestCase):
         self.assertEqual(report["counts"]["dialogue_lines"], 0)
         self.assertEqual(report["counts"]["production_tag_lines"], 3)
 
+    def test_untimed_tags_are_named_next_to_the_seconds(self) -> None:
+        """On-screen text holds screen time the speech and action rates never see.
+
+        A real run estimated 73 seconds; the storyboard, holding each text card
+        long enough to read, came out at 114. The estimate names what it left
+        out so the gap is visible at the writing stage.
+        """
+
+        report = self.measure(
+            "[SFX] 远处传来一声短促汽笛。\n\n"
+            "[画面文字] 票面日期：11月6日\n\n"
+            "葛晴：开门。\n"
+        )
+        self.assertEqual(
+            report["untimed"]["tag_lines"], {"画面文字": 1, "SFX": 1}
+        )
+        # The whole body is read, carrier included: 票面日期11月6日.
+        self.assertEqual(report["counts"]["on_screen_text_characters"], 9)
+        self.assertEqual(report["seconds"], 0.4)
+
+    def test_a_declared_reading_rate_times_on_screen_text(self) -> None:
+        project = json.loads(json.dumps(self.PROJECT))
+        project["format"]["pacing"]["on_screen_text_characters_per_second"] = 2.5
+        report = self.measure(
+            "[画面文字] 票面日期：11月6日\n\n[SFX] 汽笛。\n", project=project
+        )
+        self.assertEqual(report["on_screen_text_seconds"], 3.6)
+        self.assertEqual(report["seconds"], 3.6)
+        self.assertEqual(report["untimed"]["tag_lines"], {"SFX": 1})
+
+    def test_displayed_words_are_never_dropped_from_screen_text(self) -> None:
+        """A colon or parentheses inside on-screen text are part of what is read.
+
+        Treating the words before a colon as a carrier name dropped 已授予 from
+        a credit card, and stripping parentheses as performer notes dropped the
+        notice's own detail; both under-timed text the viewer has to read.
+        """
+
+        cases = {
+            "[画面文字] 已授予：演唱　导演\n": 7,
+            "[画面文字] 暂停营业（设备维修，请走东门）\n": 12,
+        }
+        for body, expected in cases.items():
+            with self.subTest(body=body):
+                report = self.measure(body)
+                self.assertEqual(
+                    report["counts"]["on_screen_text_characters"], expected
+                )
+
+    def test_an_off_screen_line_may_carry_a_performance_cue(self) -> None:
+        """`[OS] 角色（提示）：台词` uses the dialogue grammar, cue and all.
+
+        The index used to reject it as a voice tag with no speaker while the
+        estimate accepted it, so the two disagreed about the same line.
+        """
+
+        report = self.measure("[OS] 船员（隔着门喊）：关窗！\n")
+        self.assertNotIn("incomplete", report)
+        self.assertEqual(report["counts"]["dialogue_lines"], 1)
+        self.assertEqual(report["counts"]["voiced_characters"], 2)
+
     def test_one_action_paragraph_is_one_paragraph_however_many_lines(self) -> None:
         """`screenplay-format.md` lets an action paragraph run several lines.
 
