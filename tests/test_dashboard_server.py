@@ -2372,6 +2372,121 @@ class CreatorViewsTests(unittest.TestCase):
             ["EP001-SC001"],
         )
 
+    def test_a_delivery_group_is_one_submission_standing_for_its_members(self) -> None:
+        video = example("视频提示词.md") + (
+            "\n## GROUP-EP001-01 · 茶杯到双人\n- 成员：MOTION-EP001-001、MOTION-EP001-002\n"
+            "- 时长：7s\n\n### 可复制提示词\n> 镜头1：攥紧的茶杯。镜头2：穿 pine-green lapel service jacket 的四个号四个粉。\n"
+        )
+        episode = self.episode(**{"视频提示词.md": video})
+        self.assertEqual(
+            episode["videoGroups"],
+            [{
+                "id": "GROUP-EP001-01", "n": "01", "title": "茶杯到双人",
+                "members": ["MOTION-EP001-001", "MOTION-EP001-002"], "sec": 7.0,
+                "prompt": "镜头1：攥紧的茶杯。镜头2：穿 pine-green lapel service jacket 的四个号四个粉。",
+            }],
+        )
+        self.assertEqual(len(episode["videoPrompts"]), 22)
+        hits = views.search(views.search_entries(episode), "镜头1：攥紧的茶杯")
+        self.assertIn("GROUP-EP001-01", [hit.get("id") for hit in hits])
+        # A member's own card is folded into the group, so its search hit opens
+        # the shot drawer, where the member prompt is still shown.
+        member = next(row for row in views.search_entries(episode) if row["w"] == "MOTION-EP001-002")
+        self.assertEqual((member["view"], member["arg"]), ("board", "SHOT-EP001-002"))
+        without_board = dict(episode, board=None)
+        member = next(row for row in views.search_entries(without_board) if row["w"] == "MOTION-EP001-002")
+        self.assertEqual((member["view"], member.get("id")), ("prompts", "GROUP-EP001-01"))
+
+    def test_a_group_with_a_missing_member_hides_nothing(self) -> None:
+        video = example("视频提示词.md") + (
+            "\n## GROUP-EP001-01 · 有缺口\n- 成员：MOTION-EP001-999、MOTION-EP001-001\n"
+            "- 时长：3s\n\n### 可复制提示词\n> 镜头1：……\n"
+        )
+        episode = self.episode(**{"视频提示词.md": video})
+        self.assertEqual(episode["videoGroups"], [])
+        self.assertTrue(any("GROUP-EP001-01" in problem and "MOTION-EP001-999" in problem for problem in episode["problems"]))
+        member = next(row for row in views.search_entries(episode) if row["w"] == "MOTION-EP001-001")
+        self.assertEqual(member["view"], "prompts")
+
+    def test_out_of_order_or_repeated_groups_hide_nothing(self) -> None:
+        group = "\n## {gid} · 坏分组\n- 成员：{members}\n- 时长：{sec}\n\n### 可复制提示词\n> 镜头1：……\n"
+        cases = {
+            "gap": group.format(gid="GROUP-EP001-01", members="MOTION-EP001-001、MOTION-EP001-003", sec="5s"),
+            "across scenes": group.format(gid="GROUP-EP001-01", members="MOTION-EP001-013、MOTION-EP001-014", sec="{sec}"),
+            "duplicate id": group.format(gid="GROUP-EP001-01", members="MOTION-EP001-001、MOTION-EP001-002", sec="7s")
+            + group.format(gid="GROUP-EP001-01", members="MOTION-EP001-003、MOTION-EP001-004", sec="5s"),
+        }
+        motions = {
+            prompt["id"]: prompt["sec"] for prompt in self.episode()["videoPrompts"]
+        }
+        cases["across scenes"] = cases["across scenes"].replace(
+            "{sec}", f"{motions['MOTION-EP001-013'] + motions['MOTION-EP001-014']:g}s"
+        )
+        for label, extra in cases.items():
+            with self.subTest(case=label):
+                episode = self.episode(**{"视频提示词.md": example("视频提示词.md") + extra})
+                self.assertEqual(episode["videoGroups"], [])
+                self.assertTrue(any("GROUP-EP001-01" in problem for problem in episode["problems"]))
+
+    def test_a_group_that_drops_a_lock_hides_nothing(self) -> None:
+        bodies = {prompt["id"]: prompt["prompt"] for prompt in self.episode()["videoPrompts"]}
+        body = (bodies["MOTION-EP001-001"] + " " + bodies["MOTION-EP001-002"]).replace(
+            "pine-green lapel service jacket", "olive jacket"
+        )
+        seconds = sum(p["sec"] for p in self.episode()["videoPrompts"] if p["id"] in ("MOTION-EP001-001", "MOTION-EP001-002"))
+        video = example("视频提示词.md") + (
+            f"\n## GROUP-EP001-01 · 掉锁\n- 成员：MOTION-EP001-001、MOTION-EP001-002\n- 时长：{seconds:g}s\n\n### 可复制提示词\n> {body}\n"
+        )
+        episode = self.episode(**{"视频提示词.md": video})
+        self.assertEqual(episode["videoGroups"], [])
+        self.assertTrue(any("LOCK-JIANGCHEN-DRESS" in problem for problem in episode["problems"]))
+
+    def test_an_unpaired_storyboard_keeps_groups_unfolded(self) -> None:
+        board = example("分镜.md")
+        cut = board.index("## SHOT-EP001-022")
+        video = example("视频提示词.md") + (
+            "\n## GROUP-EP001-01 · 成对\n- 成员：MOTION-EP001-001、MOTION-EP001-002\n- 时长：7s\n\n"
+            "### 可复制提示词\n> 穿 pine-green lapel service jacket 的镜头。\n"
+        )
+        episode = self.episode(**{"分镜.md": board[:cut], "视频提示词.md": video})
+        self.assertEqual(episode["videoGroups"], [])
+        self.assertTrue(any("GROUP-EP001-01" in problem and "未一一对应" in problem for problem in episode["problems"]))
+
+    def test_an_in_frame_lock_reaches_the_shots_that_list_its_entry(self) -> None:
+        settings = re.sub(r"（镜头：SHOT-EP001-002[^；]*；", "（镜头：入画；", example("视觉设定.md"), count=1)
+        episode = self.episode(**{"视觉设定.md": settings})
+        lock = next(item["lock"] for item in episode["settings"]["items"] if item["lock"])
+        listing = [
+            shot["id"] for shot in episode["board"]["shots"]
+            if any(b["cat"] == "人物" and b["name"] == "江晨" for b in shot["basis"])
+        ]
+        self.assertEqual((lock["scope"], lock["shots"]), ("入画", listing))
+        self.assertIn("SHOT-EP001-004", listing)
+
+    def test_a_misspelled_member_hides_nothing(self) -> None:
+        video = example("视频提示词.md") + (
+            "\n## GROUP-EP001-01 · 拼错\n- 成员：MOTION-EP001-001、MOTON-EP001-002\n"
+            "- 时长：7s\n\n### 可复制提示词\n> 镜头1：……\n"
+        )
+        episode = self.episode(**{"视频提示词.md": video})
+        self.assertEqual(episode["videoGroups"], [])
+        self.assertTrue(any("MOTON-EP001-002" in problem for problem in episode["problems"]))
+
+    def test_groups_that_share_members_hide_nothing(self) -> None:
+        group = "\n## {gid} · 重叠\n- 成员：MOTION-EP001-001、MOTION-EP001-002\n- 时长：7s\n\n### 可复制提示词\n> 镜头1：……\n"
+        video = example("视频提示词.md") + group.format(gid="GROUP-EP001-01") + group.format(gid="GROUP-EP001-02")
+        episode = self.episode(**{"视频提示词.md": video})
+        self.assertEqual(episode["videoGroups"], [])
+        self.assertTrue(any("GROUP-EP001-02" in problem for problem in episode["problems"]))
+
+    def test_a_group_without_a_usable_body_hides_nothing(self) -> None:
+        video = example("视频提示词.md") + (
+            "\n## GROUP-EP001-01 · 无正文\n- 成员：MOTION-EP001-001、MOTION-EP001-002\n- 时长：7s\n"
+        )
+        episode = self.episode(**{"视频提示词.md": video})
+        self.assertEqual(episode["videoGroups"], [])
+        self.assertTrue(any("GROUP-EP001-01" in problem and "可复制提示词" in problem for problem in episode["problems"]))
+
     def test_the_storyboard_is_read_by_the_checkers_own_functions(self) -> None:
         # Change what the checker thinks a duration is and the dashboard follows;
         # a second parser would keep answering 62.
